@@ -58,13 +58,23 @@ class MySeq2SeqLMOutput(ModelOutput):
     """
 
 
+    # 语言建模损失值,当提供labels时返回
     loss: Optional[torch.FloatTensor] = None
+    # 领域分类的损失值
     domain_loss: Optional[torch.FloatTensor] = None
+    # 语言建模头的预测分数(SoftMax前的每个词表token的分数)
     logits: torch.FloatTensor = None
+    # 预计算的隐藏状态,用于加速顺序解码
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    # 解码器每层输出的隐藏状态
     decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    # 解码器的注意力权重
     decoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    # 解码器交叉注意力层的注意力权重
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    # 编码器最后一层的隐藏状态
     encoder_last_hidden_state: Optional[torch.FloatTensor] = None
+    # 编码器每层输出的隐藏状态
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    # 编码器的注意力权重
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
