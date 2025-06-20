@@ -135,6 +135,10 @@ def load_tf_weights_in_t5(model, config, tf_checkpoint_path):
         for m_name in name:
             # 处理带数字后缀的层名（如layer_0, layer_1等）
             if re.fullmatch(r"[A-Za-z]+_\d+", m_name):
+                # 使用正则表达式将带数字后缀的层名分割成基础名称和数字索引
+                # 例如: "layer_0" -> ["layer", "0", ""]
+                # 例如: "block_12" -> ["block", "12", ""]
+                # 括号捕获组会将匹配的数字作为单独的元素保留在结果列表中
                 scope_names = re.split(r"_(\d+)", m_name)
             else:
                 scope_names = [m_name]
@@ -474,3 +478,321 @@ class T5Block(nn.Module):
 
 
 
+class T5Model(T5PreTrainedModel):
+
+    # 在加载预训练模型时，忽略这些缺失的参数键
+    # 这些参数通常会在模型初始化后重新设置或共享
+    _keys_to_ignore_on_load_missing = [
+        r"encoder\.embed_tokens\.weight",  # 编码器的词嵌入权重
+        r"decoder\.embed_tokens\.weight",  # 解码器的词嵌入权重
+    ]
+
+    # 在加载预训练模型时，忽略这些意外出现的参数键
+    # 这些参数可能在某些模型配置中不存在，但在检查点中存在
+    _keys_to_ignore_on_load_unexpected = [
+        r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",  # 解码器第0层交叉注意力的相对位置偏置权重
+    ]
+
+
+    def __init__(self, config: T5Config):
+        super().__init__(config)
+
+        self.encoder = T5EncoderModel(config, add_pooling_layer=False)
+        self.decoder = T5DecoderModel(config, add_pooling_layer=False)
+
+
+    def get_input_embeddings(self):
+        return self.shared
+
+    def set_input_embeddings(self, new_embeddings):
+        self.shared = new_embeddings
+        self.encoder.set_input_embeddings(new_embeddings)
+        self.decoder.set_input_embeddings(new_embeddings)
+
+
+    def get_encoder(self):
+        return self.encoder
+
+    def get_decoder(self):
+        return self.decoder
+
+    def _prune_heads(self, heads_to_prune):
+        pass
+
+    
+
+
+    @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Seq2SeqModelOutput, config_class=_CONFIG_FOR_DOC)
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            decoder_input_ids=None,
+            decoder_attention_mask=None,
+            head_mask=None,
+            decoder_head_mask=None,
+            cross_attn_head_mask=None,
+            encoder_outputs=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            decoder_inputs_embeds=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+    ):
+        r"""
+        Returns:
+
+        Example::
+
+            >>> from transformers import T5Tokenizer, T5Model
+
+            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            >>> model = T5Model.from_pretrained('t5-small')
+
+            >>> input_ids = tokenizer("Studies have been shown that owning a dog is good for you", return_tensors="pt").input_ids  # Batch size 1
+            >>> decoder_input_ids = tokenizer("Studies show that", return_tensors="pt").input_ids  # Batch size 1
+            >>> outputs = model(input_ids=input_ids, decoder_input_ids=decoder_input_ids)
+
+            >>> last_hidden_states = outputs.last_hidden_state
+        """
+
+
+
+
+
+@add_start_docstrings("""T5 Model with a `language modeling` head on top. """, T5_START_DOCSTRING)
+class T5ForConditionalGeneration(T5PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [
+        r"encoder\.embed_tokens\.weight",
+        r"decoder\.embed_tokens\.weight",
+        r"lm_head\.weight",
+    ]
+    _keys_to_ignore_on_load_unexpected = [
+        r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
+    ]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model_dim = config.d_model
+
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+
+        encoder_config = copy.deepcopy(config)
+        encoder_config.is_decoder = False
+        encoder_config.use_cache = False
+        encoder_config.is_encoder_decoder = False
+        self.encoder = T5Stack(encoder_config, self.shared)
+
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+        decoder_config.is_encoder_decoder = False
+        decoder_config.num_layers = config.num_decoder_layers
+        self.decoder = T5Stack(decoder_config, self.shared)
+
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+
+        self.init_weights()
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+
+
+
+
+
+
+    def get_input_embeddings(self):
+        return self.shared
+
+    def set_input_embeddings(self, new_embeddings):
+        self.shared = new_embeddings
+        self.encoder.set_input_embeddings(new_embeddings)
+        self.decoder.set_input_embeddings(new_embeddings)
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def get_encoder(self):
+        return self.encoder
+
+    def get_decoder(self):
+        return self.decoder
+
+    @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            decoder_input_ids=None,
+            decoder_attention_mask=None,
+            head_mask=None,
+            decoder_head_mask=None,
+            cross_attn_head_mask=None,
+            encoder_outputs=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            decoder_inputs_embeds=None,
+            labels=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            past_prompt=None,  # TODO: Chen
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
+            config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
+            labels in ``[0, ..., config.vocab_size]``
+
+        Returns:
+
+        Examples::
+
+            >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
+
+            >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
+            >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2> </s>', return_tensors='pt').input_ids
+            >>> outputs = model(input_ids=input_ids, labels=labels)
+            >>> loss = outputs.loss
+            >>> logits = outputs.logits
+
+            >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you ", return_tensors="pt").input_ids  # Batch size 1
+            >>> outputs = model.generate(input_ids)
+        """
+
+
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@add_start_docstrings(
+    "The bare T5 Model transformer outputting encoder's raw hidden-states" "without any specific head on top.",
+    T5_START_DOCSTRING,
+)
+class T5EncoderModel(T5PreTrainedModel):
+    authorized_missing_keys = [
+        r"encoder\.embed_tokens\.weight",
+    ]
+
+    def __init__(self, config: T5Config):
+        super().__init__(config)
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+
+        encoder_config = copy.deepcopy(config)
+        encoder_config.use_cache = False
+        encoder_config.is_encoder_decoder = False
+        self.encoder = T5Stack(encoder_config, self.shared)
+
+        self.init_weights()
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+
+
+    @add_start_docstrings(PARALLELIZE_DOCSTRING)
+    def parallelize(self, device_map=None):
+        self.device_map = (
+            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
+        )
+        assert_device_map(self.device_map, len(self.encoder.block))
+        self.encoder.parallelize(self.device_map)
+        self.model_parallel = True
+
+    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
+    def deparallelize(self):
+        self.encoder.deparallelize()
+        self.encoder = self.encoder.to("cpu")
+        self.model_parallel = False
+        self.device_map = None
+        torch.cuda.empty_cache()
+
+    def get_input_embeddings(self):
+        return self.shared
+
+    def set_input_embeddings(self, new_embeddings):
+        self.shared = new_embeddings
+        self.encoder.set_input_embeddings(new_embeddings)
+
+    def get_encoder(self):
+        return self.encoder
+
+    def _prune_heads(self, heads_to_prune):
+        """
+        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
+        class PreTrainedModel
+        """
+        for layer, heads in heads_to_prune.items():
+            self.encoder.layer[layer].attention.prune_heads(heads)
+
+    @add_start_docstrings_to_model_forward(T5_ENCODER_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=BaseModelOutput, config_class=_CONFIG_FOR_DOC)
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            head_mask=None,
+            inputs_embeds=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+    ):
+        r"""
+        Returns:
+
+        Example::
+
+            >>> from transformers import T5Tokenizer, T5EncoderModel
+            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            >>> model = T5EncoderModel.from_pretrained('t5-small')
+            >>> input_ids = tokenizer("Studies have been shown that owning a dog is good for you", return_tensors="pt").input_ids  # Batch size 1
+            >>> outputs = model(input_ids=input_ids)
+            >>> last_hidden_states = outputs.last_hidden_state
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        encoder_outputs = self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        return encoder_outputs
